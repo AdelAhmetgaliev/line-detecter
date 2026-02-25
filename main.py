@@ -1,8 +1,8 @@
-import os
 import csv
-
+import logging
+from typing import Iterable, List, Sequence, Tuple, Optional
+from dataclasses import dataclass
 from pathlib import Path
-# from pprint import pprint
 
 import matplotlib.pyplot as plt
 
@@ -16,85 +16,167 @@ from src.lines import (
     calc_line_strength,
 )
 
-DATA_DIR: str = os.path.join(os.path.dirname(__file__), "data")
-SPECTRA_BOUNDS: tuple[float, float] = (5250.0, 5300.0)
-# SPECTRA_BOUNDS: tuple[float, float] = (5295.0, 5350.0)
 
-SHOW_PLOTS: bool = False
-SAVE_PLOTS: bool = False
+# --- Configuration -----------------------------------------------------------------
+@dataclass(frozen=True)
+class Config:
+    project_root: Path = Path(__file__).parent
+    data_dir: Path = project_root / "data"
+    output_dir: Path = project_root / "output"
+    spectra_file: str = "spectra.dat"
+    lines_file: str = "lines.dat"
+    spectra_bounds: Tuple[float, float] = (5250.0, 5300.0)
+    peak_height: float = 0.1
+    strength_reference_temp: float = 7800.0
+    strength_threshold: float = 0.35
+    save_plots: bool = False
+    show_plots: bool = False
+    figure_name: str = "spectra_adel.png"
+    figure_dpi: int = 500
+    result_csv: str = "result.csv"
 
 
-def main() -> None:
-    path_to_spectra = Path(os.fspath(DATA_DIR)) / "spectra.dat"
-    path_to_lines = Path(os.fspath(DATA_DIR)) / "lines.dat"
+CFG = Config()
 
-    spec: Spectra = Spectra.from_file(path_to_spectra).filter_by_wavelength(
-        *SPECTRA_BOUNDS
-    )
-    lines: list[SpectralLine] = parse_linefile(path_to_lines)  # type: ignore
+# --- Logging -----------------------------------------------------------------------
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+logger = logging.getLogger(__name__)
 
-    _, peak_metas = detect_spectrum_peaks(spec, height=0.1)
 
-    fig, ax = plot_spectra(spec, show=False)
-    draw_peak_lines(fig, ax, peak_metas)
+# --- I/O Helpers -------------------------------------------------------------------
+def ensure_paths(cfg: Config) -> None:
+    cfg.data_dir.mkdir(parents=True, exist_ok=True)
+    cfg.output_dir.mkdir(parents=True, exist_ok=True)
 
-    data = []
-    for peak in peak_metas:
-        obs_wl = peak["wl"]
-        cand_list = find_candidates_for_observed(obs_wl, lines)  # type: ignore
 
-        line_strength_list: list[tuple[SpectralLine, float]] = []
-        for line in cand_list:
-            strength = calc_line_strength(line, 7800.0)
-            line_strength_list.append((line, strength))
+def load_inputs(cfg: Config) -> Tuple[Path, Path]:
+    spectra_path = cfg.data_dir / cfg.spectra_file
+    lines_path = cfg.data_dir / cfg.lines_file
 
-        line_strength_list.sort(key=lambda tup: tup[1], reverse=True)
-        max_strength = line_strength_list[0][1]
+    if not spectra_path.exists():
+        raise FileNotFoundError(f"spectra file not found: {spectra_path}")
+    if not lines_path.exists():
+        raise FileNotFoundError(f"lines file not found: {lines_path}")
 
-        new_cand_list: list[tuple] = []
-        for tup in line_strength_list:
-            if abs(tup[1] - max_strength) < 0.35:
-                new_cand_list.append(tup)
+    return spectra_path, lines_path
 
-        label_str = ""
-        idx = 0
-        for tup in new_cand_list:
-            if idx < len(new_cand_list) - 1:
-                label_str += (
-                    f"{get_element_symbol(tup[0].element)}{'I' * tup[0].ion_stage} + "
-                )
-            idx += 1
-        label_str += f"{get_element_symbol(new_cand_list[-1][0].element)}{'I' * new_cand_list[-1][0].ion_stage}"
-        label_element_on_line(ax, obs_wl, label_str, y=peak["intens"] / 1.07)
-        data.append([obs_wl, new_cand_list, peak["intens"]])
 
-    if SAVE_PLOTS:
-        save_figure(fig, "spectra_adel.png", dpi=500)
-    if SHOW_PLOTS:
-        plt.show()
+# --- Analysis ----------------------------------------------------------------------
+def select_candidates(
+    cand_list: Sequence[SpectralLine],
+    temp: float,
+    threshold: float,
+) -> List[Tuple[SpectralLine, float]]:
+    """Return candidate lines with strength within threshold of the best."""
+    strengths: List[Tuple[SpectralLine, float]] = [
+        (line, calc_line_strength(line, temp)) for line in cand_list
+    ]
+    if not strengths:
+        return []
+    strengths.sort(key=lambda x: x[1], reverse=True)
+    max_s = strengths[0][1]
+    selected = [t for t in strengths if abs(t[1] - max_s) < threshold]
+    return selected
 
-    with open(file="result.csv", mode="w+", encoding="utf-8", newline="") as res_file:
-        writer = csv.writer(res_file)
-        writer.writerow(
-            ["λ изм, Å", "λ теор, Å", "элемент", "стадия ионизации", "S", "I_λ"]
-        )
-        for entry in data:
-            lambda_izm = entry[0]
-            lines: list[tuple] = entry[1]
-            I_lambda = entry[2] if len(entry) > 2 else ""
+
+def format_label(candidates: Sequence[Tuple[SpectralLine, float]]) -> str:
+    if not candidates:
+        return "no match"
+    parts = [
+        f"{get_element_symbol(line.element)}{'I' * line.ion_stage}"
+        for line, _ in candidates
+    ]
+    return " + ".join(parts)
+
+
+# --- CSV Output --------------------------------------------------------------------
+CSV_HEADERS = ["λ изм, Å", "λ теор, Å", "элемент", "стадия ионизации", "S", "I_λ"]
+
+
+def write_results_csv(
+    path: Path,
+    rows: Iterable[Tuple[float, Sequence[Tuple[SpectralLine, float]], Optional[float]]],
+) -> None:
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(CSV_HEADERS)
+        for lambda_izm, candidates, I_lambda in rows:
             first = True
-            for line_obj, S in lines:
+            I_val = I_lambda if I_lambda is not None else ""
+            for line_obj, S in candidates:
                 writer.writerow(
                     [
                         f"{lambda_izm:.2f}" if first else "",
                         line_obj.laboratory_wavelength,
                         get_element_symbol(line_obj.element),
                         "I" * line_obj.ion_stage,
-                        S,
-                        I_lambda,
+                        f"{S:.6g}",
+                        I_val,
                     ]
                 )
                 first = False
+
+
+# --- Main flow --------------------------------------------------------------------
+def analyze_and_plot(
+    cfg: Config,
+) -> List[Tuple[float, List[Tuple[SpectralLine, float]], Optional[float]]]:
+    spectra_path, lines_path = load_inputs(cfg)
+
+    spec = Spectra.from_file(spectra_path).filter_by_wavelength(*cfg.spectra_bounds)
+    lines = parse_linefile(lines_path)  # type: ignore
+
+    logger.info(
+        "Loaded spectrum (points=%d) and lines (count=%d)",
+        len(spec.wavelengths()),
+        len(lines),
+    )
+
+    _, peak_metas = detect_spectrum_peaks(spec, height=cfg.peak_height)
+
+    fig, ax = plot_spectra(spec, show=False)
+    draw_peak_lines(fig, ax, peak_metas)
+
+    results: List[Tuple[float, List[Tuple[SpectralLine, float]], Optional[float]]] = []
+
+    for peak in peak_metas:
+        obs_wl = peak["wl"]
+        cand_list = find_candidates_for_observed(obs_wl, lines)
+        if not cand_list:
+            label = "no match"
+            label_element_on_line(ax, obs_wl, label, y=peak.get("intens", 0.0) / 1.07)
+            results.append((obs_wl, [], peak.get("intens")))
+            continue
+
+        selected = select_candidates(
+            cand_list, cfg.strength_reference_temp, cfg.strength_threshold
+        )
+        if not selected:
+            label = "no match"
+        else:
+            label = format_label(selected)
+
+        label_element_on_line(ax, obs_wl, label, y=peak.get("intens", 0.0) / 1.07)
+        results.append((obs_wl, selected, peak.get("intens")))
+
+    if cfg.save_plots:
+        out_fig = cfg.output_dir / cfg.figure_name
+        save_figure(fig, str(out_fig), dpi=cfg.figure_dpi)
+        logger.info("Saved figure to %s", out_fig)
+
+    if cfg.show_plots:
+        plt.show()
+
+    plt.close(fig)
+    return results
+
+
+def main() -> None:
+    ensure_paths(CFG)
+    results = analyze_and_plot(CFG)
+    csv_path = CFG.output_dir / CFG.result_csv
+    write_results_csv(csv_path, results)
+    logger.info("Wrote CSV results to %s", csv_path)
 
 
 if __name__ == "__main__":

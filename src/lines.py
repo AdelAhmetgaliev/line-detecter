@@ -25,8 +25,10 @@ class SpectralLine:
 def _parse_float_or_zero(s: str) -> float:
     return 0.0 if s == "--" else float(s)
 
+
 def _parse_int_or_zero(s: str) -> int:
     return 0 if s == "--" else int(s)
+
 
 def parse_linefile(path: Union[str, Path]) -> List[SpectralLine]:
     cols_expected = 8
