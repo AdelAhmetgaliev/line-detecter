@@ -60,7 +60,7 @@ def plot_spectra(spectra: Spectra, *, show: bool = True) -> Tuple:
         }
     )
 
-    fig, ax = plt.subplots(1, 1, figsize=(18, 9))
+    fig, ax = plt.subplots(1, 1, figsize=(14, 8))
 
     ax.plot(
         wl,

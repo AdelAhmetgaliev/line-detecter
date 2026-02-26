@@ -29,9 +29,9 @@ class Config:
     peak_height: float = 0.1
     strength_reference_temp: float = 7800.0
     strength_threshold: float = 0.35
-    save_plots: bool = False
-    show_plots: bool = False
-    figure_name: str = "spectra_adel.png"
+    save_plots: bool = True
+    show_plots: bool = True
+    figure_name: str = "spectra.png"
     figure_dpi: int = 500
     result_csv: str = "result.csv"
 
@@ -90,7 +90,14 @@ def format_label(candidates: Sequence[Tuple[SpectralLine, float]]) -> str:
 
 
 # --- CSV Output --------------------------------------------------------------------
-CSV_HEADERS = ["λ изм, Å", "λ теор, Å", "элемент", "стадия ионизации", "S", "I_λ"]
+CSV_HEADERS = [
+    "λ изм, Å",
+    "λ теор, Å",
+    "Элемент",
+    "Стадия ионизации",
+    "Сила линии, S",
+    "Интенсивность, I_λ",
+]
 
 
 def write_results_csv(
@@ -156,7 +163,9 @@ def analyze_and_plot(
         else:
             label = format_label(selected)
 
-        label_element_on_line(ax, obs_wl, label, y=peak.get("intens", 0.0) / 1.07)
+        label_element_on_line(
+            ax, obs_wl, label, y=peak.get("intens", 0.0) / 1.07 - len(label) * 0.01
+        )
         results.append((obs_wl, selected, peak.get("intens")))
 
     if cfg.save_plots:
